@@ -1,0 +1,61 @@
+name: order-online-v2
+
+# Small shards, one runner IP each. Google soft-blocks the picker after ~85
+# loads per IP, so a job does ~80 outlets, exits on the first block
+# (ORDER_ONLINE_STOP_ON_BLOCK), and the next shard runs on a fresh IP.
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_shard: { required: false, type: string, default: "0" }
+      count:       { required: false, type: string, default: "250" }   # ≤ 256 jobs per run
+      concurrency: { required: false, type: string, default: "2" }
+      delay_ms:    { required: false, type: string, default: "2500" }
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: mk
+        run: |
+          total=$(ls shards_v2/*.txt | wc -l)
+          first=${{ inputs.first_shard }}; count=${{ inputs.count }}
+          last=$(( first + count - 1 )); [ $last -ge $total ] && last=$(( total - 1 ))
+          echo "matrix=$(jq -nc --argjson a "$first" --argjson b "$last" '[range($a;$b+1)]')" >> "$GITHUB_OUTPUT"
+          echo "shards $first..$last of $total"
+
+  capture:
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Install Playwright
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Capture
+        env:
+          ORDER_ONLINE_STOP_ON_BLOCK: "1"
+          ORDER_ONLINE_MAX_PER_PROCESS: "200"
+        run: |
+          shard=$(printf "%03d" ${{ matrix.shard }})
+          ids="shards_v2/${shard}.txt"; out="checks-v2-${shard}.jsonl"
+          echo "shard $shard: $(wc -l < "$ids") ids"
+          node --max-old-space-size=2048 tools/order_online.mjs "$ids" "$out" ${{ inputs.concurrency }} ${{ inputs.delay_ms }} || true
+          echo "rows: $(wc -l < "$out" 2>/dev/null || echo 0)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checks-v2-${{ matrix.shard }}
+          path: checks-v2-*.jsonl
+          if-no-files-found: warn

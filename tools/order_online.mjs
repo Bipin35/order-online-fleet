@@ -51,6 +51,8 @@ const emit = (row) => out.write(JSON.stringify(row) + '\n');
 
 const browser = await chromium.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] });
 let captchaHits = 0;
+let stopped = false;
+const STOP_ON_BLOCK = process.env.ORDER_ONLINE_STOP_ON_BLOCK === '1';
 let pausedUntil = 0;
 const COOLDOWN_MS = Number(process.env.ORDER_ONLINE_COOLDOWN_MS || 600000);
 let next = 0;
@@ -154,11 +156,18 @@ async function one(ctx, placeId) {
 async function worker(n) {
   let ctx = await newCtx();
   let used = 0;
-  while (next < ids.length) {
+  while (next < ids.length && !stopped) {
     const id = ids[next++];
     const row = await one(ctx, id);
     stats[row.status] = (stats[row.status] || 0) + 1;
     emit(row);
+    if (row.status === 'captcha' && STOP_ON_BLOCK) {
+      // Fleet mode: this runner's IP is spent; exit so the caller's next job
+      // (a fresh IP) takes over. Remaining ids stay undone in out.jsonl.
+      console.error(`[w${n}] blocked on ${id} — STOP_ON_BLOCK, exiting`);
+      stopped = true;
+      break;
+    }
     if (row.status === 'captcha') {
       captchaHits++;
       // One IP, one limit: every worker pauses, not just the one that hit it.
