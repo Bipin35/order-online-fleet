@@ -1,0 +1,54 @@
+name: order-online
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:      { required: false, type: string, default: "20" }
+      concurrency: { required: false, type: string, default: "2" }
+      delay_ms:    { required: false, type: string, default: "3000" }
+      max_minutes: { required: false, type: string, default: "300" }
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - id: mk
+        run: |
+          n=${{ inputs.shards }}; n=$(( n < 1 ? 1 : (n > 20 ? 20 : n) ))
+          echo "matrix=$(jq -nc --argjson n "$n" '[range(0;$n)]')" >> "$GITHUB_OUTPUT"
+
+  capture:
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Install Playwright
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Capture
+        env:
+          ORDER_ONLINE_MAX_PER_PROCESS: "400"
+          ORDER_ONLINE_COOLDOWN_MS: "600000"
+        run: |
+          shard=$(printf "%02d" ${{ matrix.shard }})
+          ids="shards/${shard}.txt"; out="checks-${shard}.jsonl"
+          echo "shard $shard: $(wc -l < "$ids") ids"
+          # The script exits 3 with work remaining; loop until it exits 0 or time runs out.
+          timeout $(( ${{ inputs.max_minutes }} * 60 )) bash -c "until node --max-old-space-size=4096 tools/order_online.mjs '$ids' '$out' ${{ inputs.concurrency }} ${{ inputs.delay_ms }}; do sleep 5; done" || true
+          echo "rows: $(wc -l < "$out" 2>/dev/null || echo 0)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checks-${{ matrix.shard }}
+          path: checks-*.jsonl
+          if-no-files-found: warn
