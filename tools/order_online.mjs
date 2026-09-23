@@ -113,9 +113,12 @@ async function one(ctx, placeId) {
     row.picker_url = target.url().slice(0, 200);
     // Google rate-limits the picker endpoint separately from Maps: a 429 lands
     // on /sorry/ with an empty body. That is a block, not "no destinations".
-    if (/\/sorry\//.test(row.picker_url) || /unusual traffic/i.test(await target.locator('body').innerText().catch(() => ''))) {
+    const pickerHtmlLen = (await target.content().catch(() => '')).length;
+    if (/\/sorry\//.test(row.picker_url) || /unusual traffic/i.test(row.picker_text) || (popup && pickerHtmlLen < 500)) {
+      // Either the explicit 429 → /sorry/ page, or the soft block: HTTP 200
+      // with an empty 54-byte document. Both mean "this IP is done for now".
       row.status = 'captcha';
-      row.error = 'picker rate-limited (429 /sorry/)';
+      row.error = pickerHtmlLen < 500 ? 'picker soft-blocked (empty document)' : 'picker rate-limited (429 /sorry/)';
       return row;
     }
     row.picker_text = (await target.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 400);
